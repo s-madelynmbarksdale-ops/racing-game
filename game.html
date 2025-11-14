@@ -1,0 +1,211 @@
+<html><head><meta charset="utf-8"></head><script src="https://pygame-web.github.io/archives/0.9/pythons.js" data-os="vtx,fs,gui" type=module id="__main__" async defer>#<!--
+PYGBAG_FS=5
+# fmt: off
+__import__('os').chdir(__import__('tempfile').gettempdir())
+def fs_decode(fsname, o248):
+    from pathlib import Path
+    filename = Path.cwd() / fsname
+    if not filename.is_file():
+        filename.parent.mkdir(parents=True, exist_ok=True)
+        with open(fsname,"wb") as fs:
+            for input in o248.split("\n"):
+                if not input: continue
+                fs.write(bytes([ord(c) - 248 for c in input]))
+
+with open("__init__.py","w") as fs:fs.write("""\
+""")
+
+
+with open("__main__.py","w") as fs:fs.write("""\
+from .main import main
+
+if __name__ == '__main__':
+    main()
+""")
+
+
+with open("ai.py","w") as fs:fs.write("""\
+import random
+import pygame
+from pygame.math import Vector2
+
+
+class AIController:
+    def __init__(self, car, world):
+        self.car = car
+        self.world = world
+        # generate waypoints in a circle nearby
+        self.waypoints = []
+        cx, cy = car.pos
+        for i in range(12):
+            angle = i * 360 / 12
+            offset = Vector2(1, 0).rotate(angle) * (300 + random.randint(-60, 60))
+            self.waypoints.append(Vector2(cx, cy) + offset)
+        self.current = 0
+        self.tolerance = 40
+        self.inputs = set()
+
+    def step(self, dt):
+        target = self.waypoints[self.current]
+        dir_vec = (target - self.car.pos)
+        dist = dir_vec.length()
+        if dist < self.tolerance:
+            self.current = (self.current + 1) % len(self.waypoints)
+            target = self.waypoints[self.current]
+            dir_vec = (target - self.car.pos)
+
+        # desired angle
+        desired_angle = -dir_vec.angle_to(Vector2(0, -1))
+        # difference
+        diff = (desired_angle - self.car.angle + 180) % 360 - 180
+
+        self.inputs.clear()
+        # turn
+        if diff < -5:
+            self.inputs.add('left')
+        elif diff > 5:
+            self.inputs.add('right')
+
+        # throttle
+        if abs(diff) < 60:
+            self.inputs.add('throttle')
+
+    def get_inputs(self):
+        # Return a sequence of booleans compatible with pygame.key.get_pressed()
+        # We'll return a list of size 512 so it can be indexed by pygame constants.
+        # Use a dict mapping pygame key constants to booleans so indexing
+        # does not require a large list and is safer for large key codes.
+        fake = {}
+        if 'throttle' in self.inputs:
+            fake[pygame.K_UP] = True
+        if 'left' in self.inputs:
+            fake[pygame.K_LEFT] = True
+        if 'right' in self.inputs:
+            fake[pygame.K_RIGHT] = True
+        # Also provide an object compatible with pygame.key.get_pressed() lookup
+        # The code in `Car` calls keys.get(k, False) which works with dicts.
+        return fake
+""")
+
+
+with open("car.py","w") as fs:fs.write("""\
+import math
+import pygame
+from pygame.math import Vector2
+
+
+class Car:
+    def __init__(self, pos: Vector2, color=(70, 130, 255)):
+        self.pos = Vector2(pos)
+        self.velocity = Vector2(0,0)
+        self.angle = 0.0  # degrees
+        self.color = color
+        self.width = 30
+        self.height = 50
+        self.mass = 1200.0
+        self.radius = max(self.width, self.height) * 0.6
+        self.max_speed = 400
+        self.acceleration = 700
+        self.brake = 900
+        self.turn_speed = 200  # degrees per second
+        # friction coefficient (applied per second)
+        self.friction = 0.12
+        self.controller = None
+
+    def reset(self, pos):
+        self.pos = Vector2(pos)
+        self.velocity = Vector2(0,0)
+        self.angle = 0.0
+
+    def update(self, dt, keys=None):
+        if self.controller is not None:
+            # AI controller handles input
+            self.controller.step(dt)
+            keys = self.controller.get_inputs()
+
+        forward = Vector2(0, -1).rotate(self.angle)
+
+        def _pressed(k):
+            # wrappers returned by pygame.key.get_pressed do not have .get
+            try:
+                return keys.get(k, False)
+            except Exception:
+                return keys[k]
+
+        # inputs in keys: up/down/left/right
+        accel = 0
+        if keys and _pressed(pygame.K_UP):
+            accel += 1
+        if keys and _pressed(pygame.K_DOWN):
+            accel -= 1
+
+        if accel > 0:
+            self.velocity += forward * self.acceleration * dt
+        elif accel < 0:
+            # stronger applied braking
+            self.velocity += forward * -self.brake * dt
+        else:
+            # apply damping proportional to dt
+            self.velocity *= max(0.0, 1 - self.friction * dt)
+
+        # clamp speed
+        if self.velocity.length() > self.max_speed:
+            self.velocity.scale_to_length(self.max_speed)
+
+        # turning
+        steering = 0
+        if keys and _pressed(pygame.K_LEFT):
+            steering -= 1
+        if keys and _pressed(pygame.K_RIGHT):
+            steering += 1
+
+        # reduce steering at low speed
+        steer_amount = steering * self.turn_speed * dt * (self.velocity.length() / (self.max_speed / 2 + 1))
+        self.angle += steer_amount
+
+        # move
+        self.pos += self.velocity * dt
+
+    def collide_with(self, other: "Car"):
+        # simple circle-based collision resolution
+        delta = other.pos - self.pos
+        dist = delta.length()
+        min_dist = (self.radius + other.radius)
+        if dist == 0:
+            # jitter to avoid divide-by-zero
+            delta = Vector2(random.random() * 0.01 + 0.01, 0.0)
+            dist = delta.length()
+
+        if dist < min_dist:
+            # push them apart based on mass
+            overlap = min_dist - dist
+            n = delta.normalize()
+            total_mass = self.mass + other.mass
+            self.pos -= n * (overlap * (other.mass / total_mass))
+            other.pos += n * (overlap * (self.mass / total_mass))
+
+            # simple velocity exchange along normal (elastic-ish)
+            v1 = self.velocity.dot(n)
+            v2 = other.velocity.dot(n)
+            # 1D elastic collision
+            new_v1 = (v1 * (self.mass - other.mass) + 2 * other.mass * v2) / total_mass
+            new_v2 = (v2 * (other.mass - self.mass) + 2 * self.mass * v1) / total_mass
+            self.velocity += (new_v1 - v1) * n
+            other.velocity += (new_v2 - v2) * n
+
+    def draw(self, surface, offset=Vector2(0,0)):
+        # draw simple rectangle rotated
+        rect_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        rect_surf.fill(self.color)
+        rotated = pygame.transform.rotate(rect_surf, self.angle)
+        r = rotated.get_rect(center=(self.pos + offset))
+        surface.blit(rotated, r.topleft)
+""")
+
+
+# fmt:on
+del fs_decode, PYGBAG_FS
+
+asyncio.run(main())
+# --></script></html>
+
